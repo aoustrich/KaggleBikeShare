@@ -13,20 +13,6 @@ bike.test <- vroom("./test.csv")
 bike.train <- bike.train %>% 
   select(-casual, -registered)
 
-
-
-# bike.train %>% 
-#   mutate(hour = hour(datetime)) %>% 
-#   mutate(hour_cat = case_when(hour(datetime) < 6 ~ "middle of night",
-#                               hour(datetime) >= 6 & hour(datetime) <= 9 ~ "morning rush",
-#                               hour(datetime) >9 & hour(datetime) < 12 ~ "morning",
-#                               hour(datetime) >= 12 & hour(datetime) < 16 ~ "afternoon",
-#                               hour(datetime) >= 16 & hour(datetime) < 19 ~ "afternoon rush",
-#                               hour(datetime) >= 19 & hour(datetime) < 21 ~ "evening",
-#                               hour(datetime) >= 21 ~ "night"
-#                               )) %>% 
-#   view()
-
 # Make separate dataset with log(count) - This was done after the fact and led to lower score
 bike.train.l <- bike.train %>% 
   mutate(count=log(count))
@@ -40,16 +26,13 @@ my_recipe <- recipe(count~., data=bike.train) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_time(datetime, features="hour") %>%
-  step_mutate(hour_cat = case_when(hour(datetime) < 6 ~ "middle of night",
-                              hour(datetime) >= 6 & hour(datetime) <= 9 ~ "morning rush",
-                              hour(datetime) >9 & hour(datetime) < 12 ~ "morning",
-                              hour(datetime) >= 12 & hour(datetime) < 16 ~ "afternoon",
-                              hour(datetime) >= 16 & hour(datetime) < 19 ~ "afternoon rush",
-                              hour(datetime) >= 19 & hour(datetime) < 21 ~ "evening",
-                              hour(datetime) >= 21 ~ "night")) %>%
-  step_mutate(hour_cat = factor(hour_cat, levels=1:6, labels=c("middle of night","morning rush","morning",
-                                                               "afternoon","afternoon rush","evening"))) %>% 
   step_rm(datetime) %>% 
+  # step_mutate(hour_cat = case_when( hour(datetime) < 6 ~ "Early",
+  #                        hour(datetime) >= 6 & hour(datetime) <= 9 ~ "commute",
+  #                        hour(datetime) > 9 & hour(datetime) < 16 ~ "day",
+  #                        hour(datetime) >= 16 & hour(datetime) < 20 ~ "commute back",
+  #                        hour(datetime) >= 20 ~ "night")) %>% 
+  # step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>% 
   step_zv(all_predictors()) %>% 
   step_dummy(all_nominal_predictors()) %>% 
   step_normalize(all_numeric_predictors())
@@ -62,16 +45,13 @@ my_recipe.l <- recipe(count~., data=bike.train.l) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_time(datetime, features="hour") %>%
-  step_mutate(hour_cat = case_when(hour(datetime) < 6 ~ "middle of night",
-                                   hour(datetime) >= 6 & hour(datetime) <= 9 ~ "morning rush",
-                                   hour(datetime) >9 & hour(datetime) < 12 ~ "morning",
-                                   hour(datetime) >= 12 & hour(datetime) < 16 ~ "afternoon",
-                                   hour(datetime) >= 16 & hour(datetime) < 19 ~ "afternoon rush",
-                                   hour(datetime) >= 19 & hour(datetime) < 21 ~ "evening",
-                                   hour(datetime) >= 21 ~ "night")) %>%
-  step_mutate(hour_cat = factor(hour_cat, levels=1:6, labels=c("middle of night","morning rush","morning",
-                                                               "afternoon","afternoon rush","evening"))) %>% 
   step_rm(datetime) %>% 
+  # step_mutate(hour_cat = case_when( hour(datetime) < 6 ~ "Early",
+  #                                   hour(datetime) >= 6 & hour(datetime) <= 9 ~ "commute",
+  #                                   hour(datetime) > 9 & hour(datetime) < 16 ~ "day",
+  #                                   hour(datetime) >= 16 & hour(datetime) < 20 ~ "commute back",
+  #                                   hour(datetime) >= 20 ~ "night")) %>% 
+  # step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>% 
   step_zv(all_predictors()) %>% 
   step_dummy(all_nominal_predictors()) %>% 
   step_normalize(all_numeric_predictors())
@@ -96,6 +76,20 @@ predict_export <- function(workflowName, fileName){
   vroom_write(x, file=fileName,delim=',')
 }
 
+# Make function to get  LOG predictions, prep for kaggle, and export the data
+predict_export.l <- function(workflowName, fileName){
+  # make predictions and prep data for Kaggle format
+  x <- predict(workflowName,new_data=bike.test)  %>%
+    bind_cols(., bike.test) %>% 
+    select(datetime, .pred) %>% 
+    mutate(.pred=exp(.pred)) %>%
+    rename(count=.pred) %>% 
+    mutate(count=pmax(1, count)) %>% 
+    mutate(datetime=as.character(format(datetime)))
+  
+  vroom_write(x, file=fileName,delim=',')
+}
+
 # Linear Regression Model Fitting ----------------------
 # Define model
 model <- linear_reg() %>% #Type of model
@@ -112,7 +106,6 @@ extract_fit_engine(bike_workflow) %>%
   tidy()
 extract_fit_engine(bike_workflow) %>% 
   summary()
-
 
 # Make Predictions, Clean, and Export data
 predict_export(bike_workflow, "BikeSubmission.csv")
@@ -137,7 +130,7 @@ predict_export(bike_pois_workflow,"BikeSubmissionPois.csv" )
 
 # Penalized Regression ----------------------------------------------------
 # set up model
-penal_model <- linear_reg(penalty = .5, mixture = 0.2) %>% 
+penal_model <- linear_reg(penalty = 0, mixture = 0) %>% 
   set_engine('glmnet')
 
 # set up workflow using log transformed training set and log recipe
@@ -151,7 +144,7 @@ extract_fit_engine(penal_wf) %>%
   tidy()
 
 # predict and export
-predict_export(penal_wf,"BikeSubmissionPenalized.csv")
+predict_export.l(penal_wf,"BikeSubmissionPenalized.csv")
 
 # Penalized Poisson Regression --------------------------------------------
 # set up model
@@ -166,3 +159,50 @@ penal_pois_wf <- workflow() %>%
 
 # predict values and prep for kaggle
 predict_export(penal_pois_wf, "BikeSubmissionPenalizedPoisson.csv")
+
+
+
+# Tuning Penalized Regression ---------------------------------------------
+
+# set up model
+penal_model.tune <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine('glmnet')
+
+# set up workflow using log transformed training set and log recipe
+penal_wf.tune <- workflow() %>% 
+  add_recipe(my_recipe.l) %>% 
+  add_model(penal_model.tune)
+
+# create tuning grid
+tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 10)
+
+# split data for cross validation
+folds <- vfold_cv(bike.train.l, v = 20, repeats=1)
+
+# run cross validation
+cv_results <- penal_wf.tune %>% 
+  tune_grid(resamples =folds,
+            grid = tuning_grid,
+            metrics=metric_set(rmse, mae, rsq))
+
+# plot results
+collect_metrics(cv_results) %>%
+  filter(.metric=="rmse") %>%
+  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
+  geom_line()
+
+# select best model
+best_tune <- cv_results %>% 
+  select_best("rmse")
+
+# finalize workflow
+final_wf <- 
+  penal_wf.tune %>% 
+  finalize_workflow(best_tune) %>% 
+  fit(data=bike.train.l)
+
+# predict and export
+predict_export.l(final_wf,"BikeSubmissionPenalizedTune.csv")
+
