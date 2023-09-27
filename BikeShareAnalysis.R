@@ -2,6 +2,7 @@ library(tidyverse)
 library(tidymodels)
 library(vroom)
 library(poissonreg)
+library(rpart)
 
 # read in data
 bike.train <-  vroom("./train.csv")
@@ -206,3 +207,48 @@ final_wf <-
 # predict and export
 predict_export.l(final_wf,"BikeSubmissionPenalizedTune.csv")
 
+
+# Regression Tree ---------------------------------------------------------
+# set up model
+treeModel <- decision_tree(tree_depth = tune(),
+                           cost_complexity = tune(),
+                           min_n = tune()) %>% 
+            set_engine("rpart") %>% 
+            set_mode("regression")
+
+# set up workflow
+treeWF <- workflow() %>% 
+  add_recipe(my_recipe.l) %>%
+  add_model(treeModel)
+
+# create tuning grid
+tuning_grid <- grid_regular(tree_depth(),
+                            cost_complexity(),
+                            min_n(),
+                            levels = 10)
+
+# split data for cross validation
+folds <- vfold_cv(bike.train.l, v = 10, repeats=1)
+
+    # levels=5, v=5 -> .48973
+    # levels=10, v=10 -> 
+
+# run cross validation
+treeCVResults <- treeWF %>% 
+  tune_grid(resamples = folds,
+            grid = tuning_grid,
+            metrics=metric_set(rmse))
+
+
+# select best model
+best_tuneTree <- treeCVResults %>% 
+  select_best("rmse")
+
+# finalize workflow
+finalTreeWF <- 
+  treeWF %>% 
+  finalize_workflow(best_tuneTree) %>% 
+  fit(data=bike.train.l)
+
+# predict and export
+predict_export.l(finalTreeWF,"BikeSubmissionRegressionTree2.csv")
