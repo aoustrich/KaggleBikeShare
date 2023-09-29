@@ -2,7 +2,9 @@ library(tidyverse)
 library(tidymodels)
 library(vroom)
 library(poissonreg)
-library(rpart)
+library(rpart) #used for regression trees
+library(parallel)
+library(ranger) # random forests
 
 # read in data
 bike.train <-  vroom("./train.csv")
@@ -225,13 +227,13 @@ treeWF <- workflow() %>%
 tuning_grid <- grid_regular(tree_depth(),
                             cost_complexity(),
                             min_n(),
-                            levels = 10)
+                            levels = 5)
 
 # split data for cross validation
-folds <- vfold_cv(bike.train.l, v = 10, repeats=1)
+folds <- vfold_cv(bike.train.l, v = 5, repeats=1)
 
     # levels=5, v=5 -> .48973
-    # levels=10, v=10 -> 
+    # levels=10, v=10 -> more than 7 minutes....
 
 # run cross validation
 treeCVResults <- treeWF %>% 
@@ -252,3 +254,41 @@ finalTreeWF <-
 
 # predict and export
 predict_export.l(finalTreeWF,"BikeSubmissionRegressionTree2.csv")
+
+# Random Forest -----------------------------------------------------------
+randForestModel <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=500) %>% #Type of model
+                  set_engine("ranger") %>% # What R function to use
+                  set_mode("regression")
+
+forestWF <- workflow() %>% 
+  add_recipe(my_recipe.l) %>%
+  add_model(randForestModel)
+
+# create tuning grid
+forest_tuning_grid <- grid_regular(mtry(range = c(1,10) ),
+                            min_n(),
+                            levels = 5)
+
+# split data for cross validation
+rfolds <- vfold_cv(bike.train.l, v = 5, repeats=1)
+
+# run cross validation
+treeCVResults <- forestWF %>% 
+  tune_grid(resamples = rfolds,
+            grid = forest_tuning_grid,
+            metrics=metric_set(rmse)) #8.5 minute run time
+
+# select best model
+best_tuneForest <- treeCVResults %>% 
+  select_best("rmse")
+
+# finalize workflow
+finalForestWF <- 
+  forestWF %>% 
+  finalize_workflow(best_tuneForest) %>% 
+  fit(data=bike.train.l)
+
+# predict and export
+predict_export.l(finalForestWF,"BikeSubmissionRandomForest.csv")
