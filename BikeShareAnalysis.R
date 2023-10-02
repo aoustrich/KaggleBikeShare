@@ -5,6 +5,7 @@ library(poissonreg)
 library(rpart) #used for regression trees
 library(parallel)
 library(ranger) # random forests
+library(stacks) # used to stack models
 
 # read in data
 bike.train <-  vroom("./train.csv")
@@ -269,16 +270,18 @@ forestWF <- workflow() %>%
 # create tuning grid
 forest_tuning_grid <- grid_regular(mtry(range = c(1,10) ),
                             min_n(),
-                            levels = 5)
+                            levels = 6)
 
 # split data for cross validation
-rfolds <- vfold_cv(bike.train.l, v = 5, repeats=1)
+rfolds <- vfold_cv(bike.train.l, v = 6, repeats=1)
+
+doParallel::registerDoParallel(4)
 
 # run cross validation
 treeCVResults <- forestWF %>% 
   tune_grid(resamples = rfolds,
             grid = forest_tuning_grid,
-            metrics=metric_set(rmse)) #8.5 minute run time
+            metrics=metric_set(rmse)) #13.5 minute run time -> parallel only took 7 minutes
 
 # select best model
 best_tuneForest <- treeCVResults %>% 
@@ -291,4 +294,93 @@ finalForestWF <-
   fit(data=bike.train.l)
 
 # predict and export
-predict_export.l(finalForestWF,"BikeSubmissionRandomForest.csv")
+predict_export.l(finalForestWF,"BikeSubmissionRandomForest2.csv")
+
+
+# Stacking Models ---------------------------------------------------------
+# Split data for Cross Validation
+folds <- vfold_cv(bike.train.l, v = 6, repeats=1)
+
+# Control settings for Stacking
+untunedModel <- control_stack_grid()
+tunedModel <- control_stack_resamples()
+
+# Re-define models
+
+### Linear Regression
+lin_reg <- linear_reg() %>% #Type of model
+  set_engine("lm")
+
+# Set up workflow
+linearWF <- workflow() %>%
+  add_recipe(my_recipe.l) %>%
+  add_model(lin_reg) 
+
+# fit 
+lin_reg_model <- fit_resamples(
+  linearWF,
+  resamples = folds,
+  metrics = metric_set(rmse, mae, rsq),
+  control = tunedModel
+)
+
+### Penalized Regression
+penal_model <- linear_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine('glmnet')
+
+# set up workflow using log transformed training set and log recipe
+penal_wf <- workflow() %>% 
+  add_recipe(my_recipe.l) %>% 
+  add_model(penal_model) 
+
+
+# create tuning grid
+penal_tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 5)
+# run cross validation
+penal_models <- penal_wf %>%
+          tune_grid(resamples=folds,
+                    grid=penal_tuning_grid,
+                    metrics=metric_set(rmse),
+                    control = untunedModel) 
+
+### Random Forest
+randForestModel <- rand_forest(mtry =tune(),
+                               min_n=tune(),
+                               trees=500) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+forestWF <- workflow() %>% 
+  add_recipe(my_recipe.l) %>%
+  add_model(randForestModel)
+
+doParallel::registerDoParallel(4)
+
+# run cross validation
+treeCVResults <- forestWF %>% 
+  tune_grid(resamples = folds,
+            grid = forest_tuning_grid,
+            metrics=metric_set(rmse, mae, rsq),
+            control = untunedModel) 
+
+#### Stack
+# set up stack
+myStack <- stacks() %>% 
+  add_candidates(lin_reg_model) %>% 
+  add_candidates(penal_models) %>% 
+  add_candidates(treeCVResults)
+
+# fit stacked model
+stackedModel <- myStack %>% 
+  blend_predictions() %>% 
+  fit_members()
+
+# get predictions
+# predict and export
+predict_export.l(stackedModel,"BikeSubmissionStacked.csv")
+
+
+
+
