@@ -6,6 +6,8 @@ library(rpart) #used for regression trees
 library(parallel)
 library(ranger) # random forests
 library(stacks) # used to stack models
+library(sparklyr) #boosted trees via spark
+library(dbarts) #for BART
 
 # read in data
 bike.train <-  vroom("./train.csv")
@@ -31,12 +33,12 @@ my_recipe <- recipe(count~., data=bike.train) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_time(datetime, features="hour") %>%
   step_rm(datetime) %>% 
-  # step_mutate(hour_cat = case_when( hour(datetime) < 6 ~ "Early",
-  #                        hour(datetime) >= 6 & hour(datetime) <= 9 ~ "commute",
-  #                        hour(datetime) > 9 & hour(datetime) < 16 ~ "day",
-  #                        hour(datetime) >= 16 & hour(datetime) < 20 ~ "commute back",
-  #                        hour(datetime) >= 20 ~ "night")) %>% 
-  # step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>% 
+  step_mutate(hour_cat = case_when( hour(datetime) < 6 ~ "Early",
+                         hour(datetime) >= 6 & hour(datetime) <= 9 ~ "commute",
+                         hour(datetime) > 9 & hour(datetime) < 16 ~ "day",
+                         hour(datetime) >= 16 & hour(datetime) < 20 ~ "commute back",
+                         hour(datetime) >= 20 ~ "night")) %>%
+  step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>%
   step_zv(all_predictors()) %>% 
   step_dummy(all_nominal_predictors()) %>% 
   step_normalize(all_numeric_predictors())
@@ -49,13 +51,14 @@ my_recipe.l <- recipe(count~., data=bike.train.l) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_time(datetime, features="hour") %>%
-  step_rm(datetime) %>% 
   # step_mutate(hour_cat = case_when( hour(datetime) < 6 ~ "Early",
   #                                   hour(datetime) >= 6 & hour(datetime) <= 9 ~ "commute",
   #                                   hour(datetime) > 9 & hour(datetime) < 16 ~ "day",
   #                                   hour(datetime) >= 16 & hour(datetime) < 20 ~ "commute back",
-  #                                   hour(datetime) >= 20 ~ "night")) %>% 
-  # step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>% 
+  #                                   hour(datetime) >= 20 ~ "night")) %>%
+  # step_mutate(hour_cat =factor(hour_cat, levels = 1:5, labels = c("Early","commute","day","commute back","night"))) %>%
+  step_date(datetime, features='year') %>% 
+  step_rm(datetime) %>% 
   step_zv(all_predictors()) %>% 
   step_dummy(all_nominal_predictors()) %>% 
   step_normalize(all_numeric_predictors())
@@ -380,6 +383,72 @@ stackedModel <- myStack %>%
 # get predictions
 # predict and export
 predict_export.l(stackedModel,"BikeSubmissionStacked.csv")
+
+
+
+
+
+
+
+# Boosted Tree via Spark --------------------------------------------------
+  # model setup
+boostedModel <- boost_tree(mtry = tune(),
+                           trees = 750,
+                           min_n = tune(),
+                           tree_depth = 15,
+                           learn_rate = tune(),
+                           loss_reduction = tune() ) %>% 
+  set_engine("spark") %>%
+  set_mode("regression")
+
+  # workflow setup
+boostedWF <- workflow() %>% 
+  add_recipe(my_recipe.l) %>%
+  add_model(boostedModel)
+
+  # create tuning grid
+boosted_tuning_grid <- grid_regular(mtry(range = c(1,10) ),
+                                   min_n(),
+                                   learn_rate(),
+                                   loss_reduction(),
+                                   levels = 7)
+
+  # split data for cross validation
+bfolds <- vfold_cv(bike.train.l, v = 10, repeats=1)
+
+doParallel::registerDoParallel(4)
+
+  # run cross validation
+boostedCVResults <- boostedWF %>% 
+  tune_grid(resamples = bfolds,
+            grid = boosted_tuning_grid,
+            metrics=metric_set(rmse))
+
+  # select best model
+best_tuneBoost <- boostedCVResults %>% 
+  select_best("rmse")
+
+  # finalize workflow
+finalBoostedWF <- 
+  boostedWF %>% 
+  finalize_workflow(best_tuneBoost) %>% 
+  fit(data=bike.train.l)
+
+  # predict and export
+predict_export.l(finalBoostedWF,"BikeSubmissionBoostedSpark.csv")
+
+
+
+# BART --------------------------------------------------------------------
+bartModel <- parsnip::bart(mode = "regression",
+                  engine='dbarts',trees = 32)
+
+bartWF <- workflow() %>% 
+  add_recipe(my_recipe.l) %>%
+  add_model(bartModel) %>% 
+  fit(data = bike.train.l)
+
+predict_export.l(bartWF,"BikeSubmissionBart4.csv")
 
 
 
